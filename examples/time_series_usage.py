@@ -18,6 +18,7 @@ for machine in ["A", "B"]:
         pd.date_range("2026-01-01", periods=60, freq="h"),
         temperature,
         current,
+        strict=True,
     ):
         rows.append(
             {

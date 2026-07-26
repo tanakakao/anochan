@@ -120,12 +120,7 @@ class LOFDetector(AnomalyDetector):
         if len(X) < 3:
             raise ValueError("LOF requires at least 3 training samples.")
         n_neighbors = min(max(2, self.n_neighbors), len(X) - 1)
-        self.model_ = LocalOutlierFactor(
-            n_neighbors=n_neighbors,
-            novelty=True,
-            metric=self.metric,
-            p=self.p,
-        )
+        self.model_ = LocalOutlierFactor(n_neighbors=n_neighbors, novelty=True, metric=self.metric, p=self.p)
         self.model_.fit(X)
         return self
 
@@ -255,13 +250,7 @@ class DBSCANDistanceDetector(AnomalyDetector):
 
 
 class GraphicalLassoDetector(AnomalyDetector):
-    """Learn sparse feature relationships and score precision-weighted deviation.
-
-    With ``window_size > 1`` in the pipeline, each row contains lagged feature
-    values. The learned precision matrix therefore captures both cross-feature
-    and cross-lag relationships, and the score measures deviation from those
-    learned relationships.
-    """
+    """Score deviations from sparse multivariate feature relationships."""
 
     def __init__(self, alpha: float = 0.01, max_iter: int = 200, tol: float = 1e-4) -> None:
         self.alpha = alpha
@@ -316,13 +305,11 @@ _ALIASES = {
 
 def available_detectors() -> tuple[str, ...]:
     """Return canonical built-in detector names."""
-
     return tuple(sorted(_DETECTOR_FACTORIES))
 
 
 def create_detector(name: str, params: Mapping[str, Any] | None = None) -> AnomalyDetector:
     """Create a built-in detector from its registry name."""
-
     canonical_name = _ALIASES.get(name.lower(), name.lower())
     if canonical_name not in _DETECTOR_FACTORIES:
         supported = ", ".join(available_detectors())

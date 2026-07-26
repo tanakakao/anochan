@@ -36,12 +36,12 @@ def test_fit_has_no_target_or_time_series_arguments() -> None:
         assert name not in parameters
     assert "num_cols" in parameters
     assert "cat_cols" in parameters
-    assert "model_name" in parameters
+    assert "model_names" in parameters
 
 
 def test_make_pipeline_matches_malchan_top_level_steps() -> None:
     model, preprocess, predictor = make_pipeline(
-        model_name="IsolationForest",
+        model_names=["IsolationForest"],
         num_cols=["x"],
         num_scale_type="StandardScaler",
     )
@@ -59,7 +59,7 @@ def test_numeric_and_categorical_preprocessing_are_fitted_with_model() -> None:
         df,
         num_cols=["temperature", "current"],
         cat_cols=["machine"],
-        model_name="IsolationForest",
+        model_names=["IsolationForest"],
         num_impute_type="median",
         num_scale_type="StandardScaler",
         cat_impute=True,
@@ -83,7 +83,7 @@ def test_model_params_override_malchan_defaults() -> None:
     pipeline = AnomalyDetectionPipeline().fit(
         df,
         num_cols=["temperature", "current"],
-        model_name="IsolationForest",
+        model_names=["IsolationForest"],
         model_params={"n_estimators": 17, "random_state": 7},
         num_scale_type="StandardScaler",
     )
@@ -99,7 +99,7 @@ def test_polynomial_and_decomposition_are_inside_preprocess() -> None:
     pipeline = AnomalyDetectionPipeline().fit(
         df,
         num_cols=["x1", "x2", "x3"],
-        model_name="OneClassSVM",
+        model_names=["OneClassSVM"],
         num_scale_type="StandardScaler",
         poly=True,
         poly_degree=2,
@@ -131,7 +131,7 @@ def test_anomaly_score_is_negative_decision_function() -> None:
     pipeline = AnomalyDetectionPipeline().fit(
         df,
         num_cols=["x"],
-        model_name="IsolationForest",
+        model_names=["IsolationForest"],
         model_params={"random_state": 42},
         num_scale_type="StandardScaler",
     )
@@ -146,7 +146,7 @@ def test_save_and_load_preserve_full_pipeline(tmp_path) -> None:
     pipeline = AnomalyDetectionPipeline().fit(
         df,
         num_cols=["x"],
-        model_name="OneClassSVM",
+        model_names=["OneClassSVM"],
         num_scale_type="StandardScaler",
     )
     before = pipeline.predict(df)
@@ -163,5 +163,5 @@ def test_unknown_model_lists_supported_names() -> None:
         AnomalyDetectionPipeline().fit(
             pd.DataFrame({"x": [0.0, 1.0, 2.0]}),
             num_cols=["x"],
-            model_name="unknown",
+            model_names=["unknown"],
         )

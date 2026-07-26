@@ -8,7 +8,7 @@ import pytest
 from sklearn.ensemble import IsolationForest
 from sklearn.pipeline import Pipeline
 
-from anochan import AnomalyDetectionPipeline, make_pipeline
+from anochan import AnomalyDetectionPipeline, make_pipeline, make_predictor
 
 
 def _sample_df() -> pd.DataFrame:
@@ -117,12 +117,85 @@ def test_polynomial_and_decomposition_are_inside_preprocess() -> None:
     assert pipeline.df_preprocessed.shape == (50, 2)
 
 
-def test_available_models_match_malchan_anomaly_models() -> None:
+def test_available_models_include_extracted_and_extended_models() -> None:
     assert AnomalyDetectionPipeline.available_models() == (
         "OneClassSVM",
         "IsolationForest",
         "EllipticEnvelope",
+        "LocalOutlierFactor",
+        "SGDOneClassSVM",
+        "KNN",
+        "PCAReconstruction",
+        "GaussianMixture",
     )
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "OneClassSVM",
+        "IsolationForest",
+        "EllipticEnvelope",
+        "LocalOutlierFactor",
+        "SGDOneClassSVM",
+        "KNN",
+        "PCAReconstruction",
+        "GaussianMixture",
+    ],
+)
+def test_all_models_share_pipeline_prediction_api(model_name: str) -> None:
+    rng = np.random.default_rng(10)
+    x1 = rng.normal(size=80)
+    df = pd.DataFrame(
+        {
+            "x1": x1,
+            "x2": 0.8 * x1 + rng.normal(scale=0.2, size=len(x1)),
+            "x3": rng.normal(size=len(x1)),
+        }
+    )
+    pipeline = AnomalyDetectionPipeline().fit(
+        df,
+        num_cols=["x1", "x2", "x3"],
+        model_names=[model_name],
+        num_scale_type="StandardScaler",
+    )
+
+    result = pipeline.predict(df.tail(10))
+    assert result.shape == (10, 4)
+    assert result["prediction"].isin([-1, 1]).all()
+    assert result["is_anomaly"].dtype == bool
+    assert np.isfinite(result["decision_function"]).all()
+    assert np.isfinite(result["anomaly_score"]).all()
+
+
+def test_local_outlier_factor_requires_novelty_mode() -> None:
+    with pytest.raises(ValueError, match="novelty=True"):
+        make_predictor(
+            model_names=["LocalOutlierFactor"],
+            model_params={"novelty": False},
+        )
+
+
+def test_knn_scores_clear_outlier_above_normal_observations() -> None:
+    rng = np.random.default_rng(123)
+    normal = pd.DataFrame(rng.normal(scale=0.3, size=(80, 2)), columns=["x1", "x2"])
+    pipeline = AnomalyDetectionPipeline().fit(
+        normal,
+        num_cols=["x1", "x2"],
+        model_names=["KNN"],
+        model_params={"n_neighbors": 5, "contamination": 0.05},
+        num_scale_type="StandardScaler",
+    )
+    evaluation = pd.concat(
+        [
+            normal.iloc[:10],
+            pd.DataFrame({"x1": [8.0], "x2": [8.0]}),
+        ],
+        ignore_index=True,
+    )
+
+    scores = pipeline.score_samples(evaluation)
+    assert scores.iloc[-1] > scores.iloc[:-1].max()
 
 
 def test_anomaly_score_is_negative_decision_function() -> None:

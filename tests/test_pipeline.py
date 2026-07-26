@@ -5,91 +5,163 @@ import inspect
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.ensemble import IsolationForest
+from sklearn.pipeline import Pipeline
 
-from anochan import AnomalyDetectionPipeline
+from anochan import AnomalyDetectionPipeline, make_pipeline
 
 
 def _sample_df() -> pd.DataFrame:
     rng = np.random.default_rng(42)
-    n = 80
     return pd.DataFrame(
         {
-            "x1": rng.normal(size=n),
-            "x2": rng.normal(size=n),
-            "known_label": [0] * 79 + [1],
-            "lot": ["A"] * 40 + ["B"] * 40,
+            "temperature": [*rng.normal(800.0, 4.0, 79), np.nan],
+            "current": rng.normal(12.0, 0.4, 80),
+            "machine": ["A"] * 39 + [None] + ["B"] * 40,
         }
     )
 
 
-def test_fit_api_is_tabular_and_has_no_target_columns() -> None:
+def test_fit_has_no_target_or_time_series_arguments() -> None:
     parameters = inspect.signature(AnomalyDetectionPipeline.fit).parameters
-    assert "target_col" not in parameters
-    assert "target_cols" not in parameters
-    assert "targetcols" not in parameters
-    assert "time_col" not in parameters
-    assert "group_cols" not in parameters
-    assert "window_size" not in parameters
-    assert "feature_cols" in parameters
-    assert "exclude_cols" in parameters
+    for name in (
+        "target_col",
+        "target_cols",
+        "targetcols",
+        "feature_cols",
+        "time_col",
+        "group_cols",
+        "window_size",
+    ):
+        assert name not in parameters
+    assert "num_cols" in parameters
+    assert "cat_cols" in parameters
+    assert "model_name" in parameters
 
 
-def test_auto_feature_selection_respects_exclusions() -> None:
+def test_make_pipeline_matches_malchan_top_level_steps() -> None:
+    model, preprocess, predictor = make_pipeline(
+        model_name="IsolationForest",
+        num_cols=["x"],
+        num_scale_type="StandardScaler",
+    )
+
+    assert isinstance(model, Pipeline)
+    assert list(model.named_steps) == ["preprocess", "predictor"]
+    assert model.named_steps["preprocess"] is preprocess
+    assert model.named_steps["predictor"] is predictor
+    assert isinstance(predictor, IsolationForest)
+
+
+def test_numeric_and_categorical_preprocessing_are_fitted_with_model() -> None:
     df = _sample_df()
-    model = AnomalyDetectionPipeline(detector="robust_zscore", contamination=0.1)
-    model.fit(df, exclude_cols=["known_label"])
+    pipeline = AnomalyDetectionPipeline().fit(
+        df,
+        num_cols=["temperature", "current"],
+        cat_cols=["machine"],
+        model_name="IsolationForest",
+        num_impute_type="median",
+        num_scale_type="StandardScaler",
+        cat_impute=True,
+    )
 
-    assert model.feature_cols_ == ["x1", "x2"]
-    result = model.predict(df)
-    assert list(result.columns) == ["anomaly_score", "threshold", "is_anomaly"]
-    assert result["anomaly_score"].notna().all()
-    assert result["is_anomaly"].dtype == bool
-
-
-def test_explicit_feature_selection_keeps_one_output_per_row() -> None:
-    df = _sample_df()
-    model = AnomalyDetectionPipeline(detector="knn", detector_params={"n_neighbors": 4})
-    result = model.fit_predict(df, feature_cols=["x1", "x2"])
-
-    assert result.index.equals(df.index)
-    assert len(result) == len(df)
-    assert result["anomaly_score"].notna().all()
-
-
-def test_threshold_can_change_without_retraining_scores() -> None:
-    df = _sample_df()
-    model = AnomalyDetectionPipeline(detector="isolation_forest", contamination=0.1)
-    model.fit(df, feature_cols=["x1", "x2"])
-    before = model.score_samples(df)
-
-    model.set_threshold(contamination=0.25)
-    after = model.score_samples(df)
-
-    pd.testing.assert_series_equal(before, after)
-    assert model.threshold_ == pytest.approx(np.quantile(model.training_scores_, 0.75))
+    assert list(pipeline.model.named_steps) == ["preprocess", "predictor"]
+    assert pipeline.df_preprocessed is not None
+    assert len(pipeline.df_preprocessed) == len(df)
+    assert pipeline.df_preprocessed.isna().sum().sum() == 0
+    result = pipeline.predict(df.tail(5))
+    assert list(result.columns) == [
+        "prediction",
+        "is_anomaly",
+        "decision_function",
+        "anomaly_score",
+    ]
 
 
-def test_graphical_lasso_scores_multivariate_relationship_deviation() -> None:
+def test_model_params_override_malchan_defaults() -> None:
+    df = _sample_df().fillna({"temperature": 800.0, "machine": "A"})
+    pipeline = AnomalyDetectionPipeline().fit(
+        df,
+        num_cols=["temperature", "current"],
+        model_name="IsolationForest",
+        model_params={"n_estimators": 17, "random_state": 7},
+        num_scale_type="StandardScaler",
+    )
+
+    predictor = pipeline.model.named_steps["predictor"]
+    assert predictor.n_estimators == 17
+    assert predictor.random_state == 7
+
+
+def test_polynomial_and_decomposition_are_inside_preprocess() -> None:
     rng = np.random.default_rng(1)
-    x = rng.normal(size=120)
-    df = pd.DataFrame(
-        {
-            "x1": x,
-            "x2": 2.0 * x + rng.normal(scale=0.05, size=len(x)),
-            "x3": -0.5 * x + rng.normal(scale=0.05, size=len(x)),
-        }
+    df = pd.DataFrame(rng.normal(size=(50, 3)), columns=["x1", "x2", "x3"])
+    pipeline = AnomalyDetectionPipeline().fit(
+        df,
+        num_cols=["x1", "x2", "x3"],
+        model_name="OneClassSVM",
+        num_scale_type="StandardScaler",
+        poly=True,
+        poly_degree=2,
+        decomposition=True,
+        decomposition_method="PCA",
+        dec_n_components=2,
     )
-    model = AnomalyDetectionPipeline(
-        detector="graphical_lasso",
-        detector_params={"alpha": 0.05},
+
+    preprocess = pipeline.model.named_steps["preprocess"]
+    assert list(preprocess.named_steps) == [
+        "column_preprocess",
+        "num_cat_common",
+        "common_preprocess",
+    ]
+    assert pipeline.df_preprocessed.shape == (50, 2)
+
+
+def test_available_models_match_malchan_anomaly_models() -> None:
+    assert AnomalyDetectionPipeline.available_models() == (
+        "OneClassSVM",
+        "IsolationForest",
+        "EllipticEnvelope",
     )
-    result = model.fit_predict(df, feature_cols=["x1", "x2", "x3"])
-
-    assert result["anomaly_score"].notna().all()
-    assert result["anomaly_score"].ge(0).all()
 
 
-def test_unknown_detector_lists_supported_names() -> None:
-    model = AnomalyDetectionPipeline(detector="unknown")
-    with pytest.raises(ValueError, match="Supported detectors"):
-        model.fit(_sample_df(), feature_cols=["x1", "x2"])
+def test_anomaly_score_is_negative_decision_function() -> None:
+    rng = np.random.default_rng(4)
+    df = pd.DataFrame({"x": rng.normal(size=60)})
+    pipeline = AnomalyDetectionPipeline().fit(
+        df,
+        num_cols=["x"],
+        model_name="IsolationForest",
+        model_params={"random_state": 42},
+        num_scale_type="StandardScaler",
+    )
+
+    decision = pipeline.decision_function(df)
+    score = pipeline.score_samples(df)
+    np.testing.assert_allclose(score.to_numpy(), -decision.to_numpy())
+
+
+def test_save_and_load_preserve_full_pipeline(tmp_path) -> None:
+    df = pd.DataFrame({"x": np.linspace(-1.0, 1.0, 30)})
+    pipeline = AnomalyDetectionPipeline().fit(
+        df,
+        num_cols=["x"],
+        model_name="OneClassSVM",
+        num_scale_type="StandardScaler",
+    )
+    before = pipeline.predict(df)
+
+    path = pipeline.save(tmp_path / "model.joblib")
+    loaded = AnomalyDetectionPipeline.load(path)
+    after = loaded.predict(df)
+
+    pd.testing.assert_frame_equal(before, after)
+
+
+def test_unknown_model_lists_supported_names() -> None:
+    with pytest.raises(ValueError, match="Supported models"):
+        AnomalyDetectionPipeline().fit(
+            pd.DataFrame({"x": [0.0, 1.0, 2.0]}),
+            num_cols=["x"],
+            model_name="unknown",
+        )

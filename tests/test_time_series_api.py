@@ -38,6 +38,7 @@ def _records() -> list[dict[str, object]]:
         for timestamp, value in zip(
             pd.date_range("2026-02-01", periods=6, freq="h"),
             [0, 1, 2, 3, 4, 30],
+            strict=True,
         )
     ]
 

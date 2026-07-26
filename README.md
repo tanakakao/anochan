@@ -31,7 +31,7 @@ model.fit(
     df,
     num_cols=["temperature", "current", "pressure"],
     cat_cols=["machine"],
-    model_name="IsolationForest",
+    model_names=["IsolationForest"],
     model_params={"random_state": 42},
     num_impute_type="median",
     num_scale_type="StandardScaler",
@@ -40,6 +40,8 @@ model.fit(
 
 result = model.predict(new_df)
 ```
+
+`model_names`は`malchan`と同じリスト形式ですが、異常検知では1モデルだけを指定します。
 
 `model.model`は通常のscikit-learn Pipelineなので、各ステップへ直接アクセスできます。
 
@@ -90,7 +92,7 @@ cat_cols=["machine", "product"]
 model.fit(
     df,
     num_cols=["x1", "x2", "x3"],
-    model_name="OneClassSVM",
+    model_names=["OneClassSVM"],
     num_scale_type="StandardScaler",
     poly=True,
     poly_degree=2,
@@ -107,7 +109,7 @@ model.fit(
 
 `malchan`の異常検知モデル定義から次の3モデルを移しています。
 
-| `model_name` | 既定値 |
+| `model_names`の要素 | 既定値 |
 |---|---|
 | `OneClassSVM` | `nu=0.2`, `kernel="rbf"`, `gamma="auto"` |
 | `IsolationForest` | `n_estimators=100`, `contamination="auto"` |
@@ -119,7 +121,7 @@ model.fit(
 model.fit(
     df,
     num_cols=["x1", "x2"],
-    model_name="IsolationForest",
+    model_names=["IsolationForest"],
     model_params={
         "n_estimators": 300,
         "contamination": 0.03,

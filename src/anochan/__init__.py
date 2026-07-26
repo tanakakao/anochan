@@ -1,37 +1,29 @@
-"""anochan: standalone anomaly detection for process and time-series data."""
+"""anochan: anomaly detection extracted from ``malchan``."""
 
-from .base import AnomalyDetector
-from .detectors import (
-    DBSCANDistanceDetector,
-    EllipticEnvelopeDetector,
-    GraphicalLassoDetector,
-    IsolationForestDetector,
-    KMeansDistanceDetector,
-    KNNDistanceDetector,
-    LOFDetector,
-    OneClassSVMDetector,
-    PCADetector,
-    RobustZScoreDetector,
-    available_detectors,
-    create_detector,
+from .models import AD_DEFAULT_PARAMS, AD_MODEL_DICT, available_models, make_predictor
+from .pipeline import AnomalyDetectionPipeline, make_pipeline
+from .preprocessing import (
+    make_categorical_preprocess,
+    make_common_preprocess,
+    make_numeric_preprocess,
+    make_numcat_common_preprocess,
+    make_preprocess,
+    make_preprocess_pipeline,
 )
-from .pipeline import AnomalyDetectionPipeline
 
 __all__ = [
+    "AD_DEFAULT_PARAMS",
+    "AD_MODEL_DICT",
     "AnomalyDetectionPipeline",
-    "AnomalyDetector",
-    "DBSCANDistanceDetector",
-    "EllipticEnvelopeDetector",
-    "GraphicalLassoDetector",
-    "IsolationForestDetector",
-    "KMeansDistanceDetector",
-    "KNNDistanceDetector",
-    "LOFDetector",
-    "OneClassSVMDetector",
-    "PCADetector",
-    "RobustZScoreDetector",
-    "available_detectors",
-    "create_detector",
+    "available_models",
+    "make_categorical_preprocess",
+    "make_common_preprocess",
+    "make_numeric_preprocess",
+    "make_numcat_common_preprocess",
+    "make_pipeline",
+    "make_predictor",
+    "make_preprocess",
+    "make_preprocess_pipeline",
 ]
 
 __version__ = "0.1.0"

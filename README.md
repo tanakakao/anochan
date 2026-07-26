@@ -1,6 +1,6 @@
 # anochan
 
-`anochan`は、`malchan`に含まれていた異常検知処理を独立して扱うためのPythonパッケージです。初期段階では、`malchan`の構成にできるだけ合わせて、**前処理と異常検知モデルを1つのscikit-learn Pipelineへまとめること**を優先しています。
+`anochan`は、`malchan`に含まれていた異常検知処理を独立して扱うためのPythonパッケージです。`malchan`の構成にできるだけ合わせて、**前処理と異常検知モデルを1つのscikit-learn Pipelineへまとめること**を優先しています。
 
 時系列window、装置・ライン単位の系列分割、時間集約、変化点検知は今回の範囲に含めません。
 
@@ -107,13 +107,24 @@ model.fit(
 
 ## 異常検知モデル
 
-`malchan`の異常検知モデル定義から次の3モデルを移しています。
+`malchan`由来の3モデルに加えて、同じ`fit / predict / decision_function` APIで扱える5モデルを追加しています。
 
-| `model_names`の要素 | 既定値 |
-|---|---|
-| `OneClassSVM` | `nu=0.2`, `kernel="rbf"`, `gamma="auto"` |
-| `IsolationForest` | `n_estimators=100`, `contamination="auto"` |
-| `EllipticEnvelope` | `contamination=0.01` |
+| `model_names`の要素 | 検知の考え方 | 主な用途 | 主な既定値 |
+|---|---|---|---|
+| `OneClassSVM` | カーネル境界 | 非線形な正常領域 | `nu=0.2`, `kernel="rbf"` |
+| `IsolationForest` | ランダム分割 | 汎用、大規模データ | `n_estimators=100` |
+| `EllipticEnvelope` | 頑健共分散 | 楕円状・正規分布に近い正常データ | `contamination=0.01` |
+| `LocalOutlierFactor` | 局所密度 | 正常クラスタが複数あるデータ | `n_neighbors=20`, `novelty=True` |
+| `SGDOneClassSVM` | 線形境界の確率的最適化 | 高次元・大量データ | `nu=0.05` |
+| `KNN` | 近傍までの平均距離 | 局所的に孤立した点 | `n_neighbors=5`, `contamination=0.05` |
+| `PCAReconstruction` | PCA再構成誤差 | 相関した多変量プロセス | `n_components=0.95` |
+| `GaussianMixture` | 混合正規分布の尤度 | 複数の運転モード・密度異常 | `n_components=1`, `contamination=0.05` |
+
+利用可能なモデル名は次のように確認できます。
+
+```python
+print(AnomalyDetectionPipeline.available_models())
+```
 
 既定値は`model_params`で上書きできます。
 
@@ -121,14 +132,28 @@ model.fit(
 model.fit(
     df,
     num_cols=["x1", "x2"],
-    model_names=["IsolationForest"],
+    model_names=["LocalOutlierFactor"],
     model_params={
-        "n_estimators": 300,
+        "n_neighbors": 30,
         "contamination": 0.03,
-        "random_state": 42,
     },
+    num_scale_type="StandardScaler",
 )
 ```
+
+`LocalOutlierFactor`は学習後の新規データを判定できるよう、`novelty=True`を必須としています。
+
+### モデル選択の目安
+
+- 最初の基準モデル: `IsolationForest`
+- 正常領域の境界が非線形: `OneClassSVM`
+- データ量・特徴量数が多い: `SGDOneClassSVM`
+- 局所的な密度低下を見たい: `LocalOutlierFactor`または`KNN`
+- センサ間相関からの崩れを見たい: `PCAReconstruction`
+- 正常状態が複数の分布で表せる: `GaussianMixture`
+- 正常データが単峰の楕円分布に近い: `EllipticEnvelope`
+
+距離・境界・密度を利用するモデルでは、通常`num_scale_type="StandardScaler"`を推奨します。
 
 ## 出力
 

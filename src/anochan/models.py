@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from sklearn.covariance import EllipticEnvelope
@@ -38,19 +38,25 @@ def available_models() -> tuple[str, ...]:
 
 
 def make_predictor(
-    model_name: str,
+    model_names: Sequence[str],
     model_params: Mapping[str, Any] | None = None,
 ):
     """Create one anomaly detector using ``malchan`` defaults plus overrides.
 
     Args:
-        model_name: ``OneClassSVM``, ``IsolationForest`` or
+        model_names: One-element model-name sequence, matching ``malchan``.
+            The supported value is ``OneClassSVM``, ``IsolationForest`` or
             ``EllipticEnvelope``.
         model_params: Optional parameters overriding the model defaults.
 
     Returns:
         Configured scikit-learn anomaly detector.
     """
+
+    names = list(model_names)
+    if len(names) != 1:
+        raise ValueError("model_names must contain exactly one anomaly model.")
+    model_name = names[0]
 
     if model_name not in AD_MODEL_DICT:
         supported = ", ".join(available_models())

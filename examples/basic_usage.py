@@ -19,7 +19,7 @@ model.fit(
     training_df,
     num_cols=["temperature", "current"],
     cat_cols=["machine"],
-    model_name="IsolationForest",
+    model_names=["IsolationForest"],
     model_params={"random_state": 42},
     num_impute_type="median",
     num_scale_type="StandardScaler",

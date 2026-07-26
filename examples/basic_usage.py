@@ -1,4 +1,4 @@
-"""Minimal DataFrame-first usage example."""
+"""Basic tabular anomaly-detection example."""
 
 import numpy as np
 import pandas as pd
@@ -6,28 +6,22 @@ import pandas as pd
 from anochan import AnomalyDetectionPipeline
 
 rng = np.random.default_rng(42)
-rows = 200
-frame = pd.DataFrame(
+normal = pd.DataFrame(
     {
-        "timestamp": pd.date_range("2026-01-01", periods=rows, freq="min"),
-        "machine": ["A"] * rows,
-        "temperature": rng.normal(800.0, 3.0, rows),
-        "current": rng.normal(25.0, 0.5, rows),
+        "temperature": rng.normal(800.0, 4.0, size=100),
+        "current": rng.normal(12.0, 0.4, size=100),
+        "pressure": rng.normal(1.0, 0.03, size=100),
     }
 )
-frame.loc[180:185, "temperature"] += 25.0
 
 model = AnomalyDetectionPipeline(
-    detector="graphical_lasso",
-    detector_params={"alpha": 0.05},
+    detector="isolation_forest",
     contamination=0.03,
 )
-result = model.fit_predict(
-    frame,
-    feature_cols=["temperature", "current"],
-    time_col="timestamp",
-    group_cols=["machine"],
-    window_size=5,
-)
+model.fit(normal, feature_cols=["temperature", "current", "pressure"])
 
-print(pd.concat([frame, result], axis=1).tail(20))
+new_data = normal.tail(5).copy()
+new_data.loc[new_data.index[-1], ["temperature", "current"]] = [850.0, 18.0]
+result = model.predict(new_data)
+
+print(pd.concat([new_data, result], axis=1))

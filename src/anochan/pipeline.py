@@ -1,4 +1,4 @@
-"""DataFrame-first anomaly-detection pipeline."""
+"""Preprocessing-and-model anomaly detection pipeline."""
 
 from __future__ import annotations
 
@@ -9,158 +9,237 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
 
-from .base import AnomalyDetector, FloatArray
-from .detectors import available_detectors, create_detector
+from .models import available_models, make_predictor
+from .preprocessing import make_preprocess
+
+
+def make_pipeline(
+    *,
+    model_name: str,
+    num_cols: Sequence[str] = (),
+    cat_cols: Sequence[str] = (),
+    model_params: Mapping[str, Any] | None = None,
+    num_impute_type: str | None = None,
+    num_scale_type: str | None = None,
+    cat_impute: bool = False,
+    poly: bool = False,
+    poly_degree: int = 1,
+    poly_interaction_only: bool = True,
+    decomposition: bool = False,
+    decomposition_method: str = "PCA",
+    n_components: int = 2,
+) -> tuple[Pipeline, Pipeline, Any]:
+    """Create ``preprocess`` and ``predictor`` in one sklearn pipeline.
+
+    This mirrors ``malchan.models.pipelines.make_pipeline`` while removing the
+    supervised task, target, tuning and ensemble arguments that anomaly
+    detection does not use.
+    """
+
+    preprocess = make_preprocess(
+        num_cols=num_cols,
+        cat_cols=cat_cols,
+        num_impute_type=num_impute_type,
+        num_scale_type=num_scale_type,
+        cat_impute=cat_impute,
+        poly=poly,
+        poly_degree=poly_degree,
+        poly_interaction_only=poly_interaction_only,
+        decomposition=decomposition,
+        decomposition_method=decomposition_method,
+        n_components=n_components,
+    )
+    predictor = make_predictor(
+        model_name=model_name,
+        model_params=model_params,
+    )
+    model = Pipeline(
+        steps=[
+            ("preprocess", preprocess),
+            ("predictor", predictor),
+        ]
+    )
+    return model, preprocess, predictor
 
 
 class AnomalyDetectionPipeline:
-    """Standalone anomaly-detection workflow for tabular data.
+    """High-level anomaly detection workflow based on the ``malchan`` layout.
 
-    The pipeline does not accept or require a target column. Each DataFrame row
-    is treated as one independent observation. Time-series conversion and
-    window generation are intentionally outside this package's current scope.
-
-    Args:
-        detector: Built-in detector name or a custom ``AnomalyDetector``.
-        detector_params: Parameters passed to the built-in detector.
-        contamination: Expected anomaly fraction used to calibrate the score
-            threshold from training data.
-        threshold: Fixed score threshold. When supplied, it takes precedence
-            over contamination-based calibration.
-        impute_strategy: Strategy passed to ``SimpleImputer``.
-        scale: Whether to standardize features before detector fitting.
+    The fitted ``model`` attribute is a scikit-learn ``Pipeline`` containing
+    exactly two top-level steps: ``preprocess`` and ``predictor``.
     """
 
-    def __init__(
-        self,
-        detector: str | AnomalyDetector = "isolation_forest",
-        detector_params: Mapping[str, Any] | None = None,
-        contamination: float = 0.05,
-        threshold: float | None = None,
-        impute_strategy: str = "median",
-        scale: bool = True,
-    ) -> None:
-        if not 0.0 < contamination < 1.0:
-            raise ValueError("contamination must be between 0 and 1.")
-        self.detector = detector
-        self.detector_params = dict(detector_params or {})
-        self.contamination = float(contamination)
-        self.threshold = threshold
-        self.impute_strategy = impute_strategy
-        self.scale = scale
+    def __init__(self) -> None:
+        self.X: pd.DataFrame | None = None
+        self.num_cols: list[str] = []
+        self.cat_cols: list[str] = []
+        self.all_cols: list[str] = []
+        self.model_name: str | None = None
+        self.model_params: dict[str, Any] = {}
+
+        self.num_impute_type: str | None = None
+        self.num_scale_type: str | None = None
+        self.cat_impute = False
+        self.poly = False
+        self.poly_degree = 1
+        self.poly_interaction_only = True
+        self.decomposition = False
+        self.decomposition_method = "PCA"
+        self.dec_n_components = 2
+
+        self.model: Pipeline | None = None
+        self.preprocess: Pipeline | None = None
+        self.predictor: Any | None = None
+        self.feature_names: list[str] = []
+        self.df_preprocessed: pd.DataFrame | None = None
 
     def fit(
         self,
         df: pd.DataFrame,
         *,
-        feature_cols: Sequence[str] = (),
-        exclude_cols: Sequence[str] = (),
+        num_cols: Sequence[str] = (),
+        cat_cols: Sequence[str] = (),
+        model_name: str = "IsolationForest",
+        model_params: Mapping[str, Any] | None = None,
+        num_impute_type: str | None = None,
+        num_scale_type: str | None = None,
+        cat_impute: bool = False,
+        poly: bool = False,
+        poly_degree: int = 1,
+        poly_interaction_only: bool = True,
+        decomposition: bool = False,
+        decomposition_method: str = "PCA",
+        dec_n_components: int = 2,
     ) -> "AnomalyDetectionPipeline":
-        """Fit preprocessing, detector, and threshold calibration.
+        """Fit preprocessing and anomaly detector together.
 
         Args:
-            df: Training data containing normal or mostly normal observations.
-            feature_cols: Numeric input columns. Empty means infer numeric
-                columns after applying ``exclude_cols``.
-            exclude_cols: Numeric metadata or known-label columns that must not
-                be used as model inputs during automatic feature inference.
+            df: Input table. Each row is treated as one independent sample.
+            num_cols: Numeric feature columns.
+            cat_cols: Categorical feature columns.
+            model_name: Anomaly model name.
+            model_params: Model constructor parameter overrides.
+            num_impute_type: Numeric imputation method.
+            num_scale_type: Numeric scaling method.
+            cat_impute: Whether to impute categorical columns.
+            poly: Whether to add polynomial/interaction features.
+            poly_degree: Polynomial degree.
+            poly_interaction_only: Whether polynomial expansion contains only
+                interaction terms.
+            decomposition: Whether to apply dimensionality reduction.
+            decomposition_method: ``PCA``, ``KernelPCA``, ``NMF`` or ``ICA``.
+            dec_n_components: Number of decomposition components.
+
+        Returns:
+            Fitted pipeline instance.
         """
+
         self._validate_dataframe(df)
-        self.exclude_cols_ = list(exclude_cols)
-        self.feature_cols_ = self._resolve_feature_cols(df, feature_cols)
+        self.num_cols = list(num_cols)
+        self.cat_cols = list(cat_cols)
+        self.all_cols = self.num_cols + self.cat_cols
+        self._validate_columns(df)
 
-        raw_values = self._feature_values(df)
-        self.imputer_ = SimpleImputer(strategy=self.impute_strategy, keep_empty_features=True)
-        imputed_values = np.asarray(self.imputer_.fit_transform(raw_values), dtype=float)
+        self.X = df.loc[:, self.all_cols].copy()
+        self.model_name = model_name
+        self.model_params = dict(model_params or {})
+        self.num_impute_type = num_impute_type
+        self.num_scale_type = num_scale_type
+        self.cat_impute = cat_impute
+        self.poly = poly
+        self.poly_degree = poly_degree
+        self.poly_interaction_only = poly_interaction_only
+        self.decomposition = decomposition
+        self.decomposition_method = decomposition_method
+        self.dec_n_components = dec_n_components
 
-        if self.scale:
-            self.scaler_ = StandardScaler()
-            model_values = np.asarray(self.scaler_.fit_transform(imputed_values), dtype=float)
-        else:
-            self.scaler_ = None
-            model_values = imputed_values
-
-        self.detector_ = self._build_detector()
-        self.detector_.fit(model_values)
-        self.training_scores_ = np.asarray(self.detector_.score_samples(model_values), dtype=float).reshape(-1)
-        if len(self.training_scores_) != len(df):
-            raise RuntimeError("Detector returned an unexpected number of training scores.")
-        if not np.isfinite(self.training_scores_).all():
-            raise RuntimeError("Detector returned non-finite training scores.")
-
-        self.n_features_in_ = model_values.shape[1]
-        self.threshold_ = (
-            float(self.threshold)
-            if self.threshold is not None
-            else float(np.quantile(self.training_scores_, 1.0 - self.contamination))
+        self.model, self.preprocess, self.predictor = make_pipeline(
+            model_name=self.model_name,
+            num_cols=self.num_cols,
+            cat_cols=self.cat_cols,
+            model_params=self.model_params,
+            num_impute_type=self.num_impute_type,
+            num_scale_type=self.num_scale_type,
+            cat_impute=self.cat_impute,
+            poly=self.poly,
+            poly_degree=self.poly_degree,
+            poly_interaction_only=self.poly_interaction_only,
+            decomposition=self.decomposition,
+            decomposition_method=self.decomposition_method,
+            n_components=self.dec_n_components,
         )
+        self.model.fit(self.X)
+
+        fitted_preprocess = self.model.named_steps["preprocess"]
+        transformed = fitted_preprocess.transform(self.X)
+        self.feature_names = self._resolve_feature_names(
+            fitted_preprocess,
+            transformed.shape[1],
+        )
+        self.df_preprocessed = pd.DataFrame(
+            transformed,
+            columns=self.feature_names,
+            index=self.X.index,
+        )
+        self.preprocess = fitted_preprocess
+        self.predictor = self.model.named_steps["predictor"]
         self.is_fitted_ = True
         return self
 
-    def score_samples(self, df: pd.DataFrame) -> pd.Series:
-        """Return one anomaly score for each input row."""
-        self._check_fitted()
-        self._validate_dataframe(df)
-        values = self._transform(df)
-        scores = np.asarray(self.detector_.score_samples(values), dtype=float).reshape(-1)
-        if len(scores) != len(df):
-            raise RuntimeError("Detector returned an unexpected number of scores.")
-        return pd.Series(scores, index=df.index, name="anomaly_score")
+    def transform(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Apply the fitted preprocessing pipeline and return a DataFrame."""
 
-    def predict(self, df: pd.DataFrame, *, threshold: float | None = None) -> pd.DataFrame:
-        """Return anomaly score, effective threshold, and anomaly label."""
-        scores = self.score_samples(df)
-        effective_threshold = self.threshold_ if threshold is None else float(threshold)
+        self._check_fitted()
+        X = self._select_X(df)
+        transformed = self.model.named_steps["preprocess"].transform(X)
         return pd.DataFrame(
-            {
-                "anomaly_score": scores.to_numpy(),
-                "threshold": np.full(len(df), effective_threshold, dtype=float),
-                "is_anomaly": scores.to_numpy() > effective_threshold,
-            },
-            index=df.index,
+            transformed,
+            columns=self.feature_names,
+            index=X.index,
         )
 
-    def fit_predict(
-        self,
-        df: pd.DataFrame,
-        *,
-        feature_cols: Sequence[str] = (),
-        exclude_cols: Sequence[str] = (),
-    ) -> pd.DataFrame:
-        """Fit the pipeline and return predictions for the training rows."""
-        return self.fit(df, feature_cols=feature_cols, exclude_cols=exclude_cols).predict(df)
+    def decision_function(self, df: pd.DataFrame | None = None) -> pd.Series:
+        """Return the model-native decision value; larger values are more normal."""
 
-    def set_threshold(
-        self,
-        threshold: float | None = None,
-        *,
-        contamination: float | None = None,
-    ) -> float:
-        """Update the post-fit threshold without retraining the detector."""
         self._check_fitted()
-        if threshold is not None and contamination is not None:
-            raise ValueError("Specify either threshold or contamination, not both.")
-        if threshold is None and contamination is None:
-            raise ValueError("threshold or contamination is required.")
+        X = self._select_X(df)
+        values = np.asarray(self.model.decision_function(X), dtype=float).reshape(-1)
+        return pd.Series(values, index=X.index, name="decision_function")
 
-        if threshold is not None:
-            self.threshold_ = float(threshold)
-            self.threshold = float(threshold)
-            return self.threshold_
+    def score_samples(self, df: pd.DataFrame | None = None) -> pd.Series:
+        """Return anomaly scores where larger values consistently mean anomalous."""
 
-        assert contamination is not None
-        if not 0.0 < contamination < 1.0:
-            raise ValueError("contamination must be between 0 and 1.")
-        self.contamination = float(contamination)
-        self.threshold = None
-        self.threshold_ = float(np.quantile(self.training_scores_, 1.0 - self.contamination))
-        return self.threshold_
+        scores = -self.decision_function(df)
+        scores.name = "anomaly_score"
+        return scores
+
+    def predict(self, df: pd.DataFrame | None = None) -> pd.DataFrame:
+        """Return model prediction, decision value and normalized anomaly score."""
+
+        self._check_fitted()
+        X = self._select_X(df)
+        prediction = np.asarray(self.model.predict(X), dtype=int).reshape(-1)
+        decision = np.asarray(self.model.decision_function(X), dtype=float).reshape(-1)
+        return pd.DataFrame(
+            {
+                "prediction": prediction,
+                "is_anomaly": prediction == -1,
+                "decision_function": decision,
+                "anomaly_score": -decision,
+            },
+            index=X.index,
+        )
+
+    def fit_predict(self, df: pd.DataFrame, **fit_kwargs: Any) -> pd.DataFrame:
+        """Fit the full pipeline and return predictions on the training rows."""
+
+        return self.fit(df, **fit_kwargs).predict()
 
     def save(self, path: str | Path) -> Path:
-        """Persist the fitted pipeline with joblib."""
+        """Persist the fitted high-level pipeline with joblib."""
+
         self._check_fitted()
         output_path = Path(path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,7 +248,8 @@ class AnomalyDetectionPipeline:
 
     @classmethod
     def load(cls, path: str | Path) -> "AnomalyDetectionPipeline":
-        """Load a persisted pipeline and validate its type."""
+        """Load a persisted high-level pipeline."""
+
         loaded = joblib.load(Path(path))
         if not isinstance(loaded, cls):
             raise TypeError(f"Expected {cls.__name__}, got {type(loaded).__name__}.")
@@ -177,69 +257,64 @@ class AnomalyDetectionPipeline:
         return loaded
 
     @staticmethod
-    def available_detectors() -> tuple[str, ...]:
-        """Return built-in detector names."""
-        return available_detectors()
+    def available_models() -> tuple[str, ...]:
+        """Return models inherited from the ``malchan`` anomaly implementation."""
+
+        return available_models()
 
     def get_config(self) -> dict[str, Any]:
-        """Return the fitted feature and detector configuration."""
+        """Return the fitted column, preprocessing and predictor settings."""
+
         self._check_fitted()
-        detector_name = self.detector if isinstance(self.detector, str) else type(self.detector).__name__
         return {
-            "detector": detector_name,
-            "detector_params": self.detector_params,
-            "contamination": self.contamination,
-            "threshold": self.threshold_,
-            "feature_cols": list(self.feature_cols_),
-            "exclude_cols": list(self.exclude_cols_),
-            "impute_strategy": self.impute_strategy,
-            "scale": self.scale,
+            "num_cols": list(self.num_cols),
+            "cat_cols": list(self.cat_cols),
+            "model_name": self.model_name,
+            "model_params": dict(self.model_params),
+            "num_impute_type": self.num_impute_type,
+            "num_scale_type": self.num_scale_type,
+            "cat_impute": self.cat_impute,
+            "poly": self.poly,
+            "poly_degree": self.poly_degree,
+            "poly_interaction_only": self.poly_interaction_only,
+            "decomposition": self.decomposition,
+            "decomposition_method": self.decomposition_method,
+            "dec_n_components": self.dec_n_components,
         }
 
-    def _build_detector(self) -> AnomalyDetector:
-        if isinstance(self.detector, str):
-            return create_detector(self.detector, self.detector_params)
-        if self.detector_params:
-            raise ValueError("detector_params cannot be used with a custom detector instance.")
-        if not isinstance(self.detector, AnomalyDetector):
-            raise TypeError("detector must be a registered name or AnomalyDetector instance.")
-        return self.detector
+    def _select_X(self, df: pd.DataFrame | None) -> pd.DataFrame:
+        if df is None:
+            assert self.X is not None
+            return self.X
+        self._validate_dataframe(df)
+        missing = [column for column in self.all_cols if column not in df.columns]
+        if missing:
+            raise KeyError(f"Required columns not found: {missing}.")
+        return df.loc[:, self.all_cols]
 
-    def _resolve_feature_cols(self, df: pd.DataFrame, feature_cols: Sequence[str]) -> list[str]:
-        if feature_cols:
-            resolved = list(feature_cols)
-        else:
-            excluded = set(self.exclude_cols_)
-            resolved = [column for column in df.select_dtypes(include=[np.number]).columns if column not in excluded]
-
-        if not resolved:
-            raise ValueError("No numeric feature columns were selected or inferred.")
-        if len(set(resolved)) != len(resolved):
-            raise ValueError("feature_cols contains duplicate column names.")
-        missing = [column for column in resolved if column not in df.columns]
+    def _validate_columns(self, df: pd.DataFrame) -> None:
+        if not self.all_cols:
+            raise ValueError("num_cols or cat_cols must contain at least one column.")
+        if len(set(self.all_cols)) != len(self.all_cols):
+            raise ValueError("num_cols and cat_cols contain duplicate column names.")
+        missing = [column for column in self.all_cols if column not in df.columns]
         if missing:
             raise KeyError(f"Feature columns not found: {missing}.")
-        non_numeric = [column for column in resolved if not pd.api.types.is_numeric_dtype(df[column])]
+        non_numeric = [
+            column
+            for column in self.num_cols
+            if not pd.api.types.is_numeric_dtype(df[column])
+        ]
         if non_numeric:
-            raise TypeError(f"Feature columns must be numeric: {non_numeric}.")
-        return resolved
+            raise TypeError(f"Numeric columns must have numeric dtype: {non_numeric}.")
 
-    def _feature_values(self, df: pd.DataFrame) -> FloatArray:
-        missing = [column for column in self.feature_cols_ if column not in df.columns]
-        if missing:
-            raise KeyError(f"Required feature columns not found: {missing}.")
-        return df.loc[:, self.feature_cols_].to_numpy(dtype=float, copy=True)
-
-    def _transform(self, df: pd.DataFrame) -> FloatArray:
-        raw_values = self._feature_values(df)
-        imputed_values = np.asarray(self.imputer_.transform(raw_values), dtype=float)
-        if imputed_values.shape[1] != self.n_features_in_:
-            raise ValueError(
-                f"Feature width changed from {self.n_features_in_} to {imputed_values.shape[1]}."
-            )
-        if self.scaler_ is None:
-            return imputed_values
-        return np.asarray(self.scaler_.transform(imputed_values), dtype=float)
+    @staticmethod
+    def _resolve_feature_names(preprocess: Pipeline, width: int) -> list[str]:
+        try:
+            names = preprocess.get_feature_names_out()
+            return [str(name) for name in names]
+        except (AttributeError, ValueError):
+            return [f"feature_{index}" for index in range(width)]
 
     @staticmethod
     def _validate_dataframe(df: pd.DataFrame) -> None:
@@ -249,6 +324,5 @@ class AnomalyDetectionPipeline:
             raise ValueError("df must contain at least one row.")
 
     def _check_fitted(self) -> None:
-        required = ("is_fitted_", "detector_", "threshold_", "feature_cols_")
-        if not all(hasattr(self, attribute) for attribute in required):
-            raise RuntimeError("The anomaly-detection pipeline is not fitted yet.")
+        if not getattr(self, "is_fitted_", False) or self.model is None:
+            raise RuntimeError("The anomaly detection pipeline is not fitted yet.")

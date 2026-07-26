@@ -85,13 +85,18 @@ def make_numeric_preprocess(
     return Pipeline(steps=steps)
 
 
-def make_categorical_preprocess(cat_impute: bool = False) -> Pipeline:
+def make_categorical_preprocess(
+    model_name: str,
+    cat_impute: bool = False,
+) -> Pipeline:
     """Create categorical imputation and one-hot encoding steps.
 
     The anomaly detectors extracted from ``malchan`` require numeric matrices,
     so categorical columns are one-hot encoded for every supported model.
 
     Args:
+        model_name: Detector name retained to mirror the ``malchan`` builder API.
+            All extracted anomaly detectors use one-hot encoded categories.
         cat_impute: Whether to impute missing categories with the most frequent
             value before encoding.
 
@@ -192,6 +197,7 @@ def make_preprocess_pipeline(
 
 def make_preprocess(
     *,
+    model_name: str,
     num_cols: Sequence[str] = (),
     cat_cols: Sequence[str] = (),
     num_impute_type: str | None = None,
@@ -211,7 +217,10 @@ def make_preprocess(
             impute_type=num_impute_type,
             scale_type=num_scale_type,
         ),
-        cat_process=make_categorical_preprocess(cat_impute=cat_impute),
+        cat_process=make_categorical_preprocess(
+            model_name=model_name,
+            cat_impute=cat_impute,
+        ),
         numcat_common_preprocess=make_numcat_common_preprocess(
             poly=poly,
             degree=poly_degree,

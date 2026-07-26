@@ -1,15 +1,18 @@
 # anochan
 
-`anochan` は、製造プロセス・センサ・表形式データを対象とする独立した異常検知フレームワークです。`malchan` の教師あり機械学習ワークフローから異常検知を分離し、教師なし異常検知に必要な入力・学習・異常度・しきい値管理だけを扱います。
+`anochan` は、`malchan` から異常検知部分を分離して扱うための独立した Python パッケージです。今回の初期実装では、表形式データの各行を1つの観測として扱う純粋な異常検知に範囲を限定しています。
 
-## 設計方針
+時系列window、装置・ライン別の系列分割、時間集約などは含めません。これらは、基本的な異常検知機能を分離した後の拡張として追加します。
 
-- **目的変数は不要**: `target_col` / `target_cols` / `targetcols` はAPIに存在しません。
-- **DataFrame-first**: 特徴量、時刻列、グループ列を明示して学習・判定します。
-- **時系列window対応**: 過去から現在までの値を1行へ展開し、周期的・遷移的な異常を検知します。
-- **グループ境界を保護**: 装置・ライン・品種など、異なる系列をまたいだwindowを作りません。
-- **異常度としきい値を分離**: 学習後もモデルを再学習せずにしきい値を変更できます。
-- **`malchan`は変更しない**: 本リポジトリは単独でインストール・保存・運用できます。
+## 今回の分離方針
+
+- `malchan` 側は変更しない
+- 教師なし異常検知のため、`target_col` / `target_cols` / `targetcols` は使用しない
+- 入力は `feature_cols` で指定する
+- `feature_cols` 未指定時は数値列を自動選択する
+- ラベル、ID、バッチ番号などの数値メタデータは `exclude_cols` で除外する
+- 欠損値補完、標準化、異常度計算、しきい値判定、モデル保存を提供する
+- 時系列固有の引数や処理は追加しない
 
 ## インストール
 
@@ -40,77 +43,57 @@ model = AnomalyDetectionPipeline(
 result = model.fit_predict(
     df,
     feature_cols=["temperature", "current", "pressure"],
-    time_col="timestamp",
-    group_cols=["machine"],
-    window_size=5,
 )
 
 output = pd.concat([df, result], axis=1)
-print(output[["timestamp", "anomaly_score", "is_anomaly"]])
+print(output[["anomaly_score", "threshold", "is_anomaly"]])
 ```
 
-`window_size=5`では、同一グループ内の5時点を `[t-4, t-3, t-2, t-1, t]` の順で平坦化します。各グループの先頭4行は完全なwindowを作れないため、`anomaly_score`と`is_anomaly`は欠損になります。
+各入力行に対して、次の3列を返します。
+
+| 列 | 内容 |
+|---|---|
+| `anomaly_score` | 異常度。大きいほど異常 |
+| `threshold` | 判定に使用したしきい値 |
+| `is_anomaly` | 異常判定結果 |
 
 ## 特徴量の自動選択
 
-`feature_cols=[]`または未指定の場合、数値列から時刻列・グループ列・`exclude_cols`を除いて特徴量を推定します。既知の異常ラベル、ID、バッチ番号などの数値メタデータは`exclude_cols`へ指定してください。
+`feature_cols`を指定しない場合は数値列を自動選択します。既知の異常ラベル、ID、バッチ番号など、特徴量に使用しない数値列は`exclude_cols`へ指定します。
 
 ```python
 model.fit(
     df,
     exclude_cols=["known_label", "batch_no"],
-    time_col="timestamp",
-    group_cols=["machine", "product"],
 )
 ```
 
-教師なし異常検知であるため、除外列を目的変数として学習することはありません。
+非数値列は自動選択の対象になりません。
 
 ## 利用可能な手法
 
-| detector | 異常度の考え方 | 主な用途 |
-|---|---|---|
-| `robust_zscore` | 中央値・MADからの頑健な乖離 | 単純監視、外れ値、説明しやすさ重視 |
-| `pca` | Q残差とHotelling T² | 多変量プロセス、相関したセンサ |
-| `knn` | 近傍点までの平均距離 | 局所的な疎領域の検出 |
-| `lof` | 局所密度の低下 | 複数の正常クラスタを含むデータ |
-| `isolation_forest` | 分離されやすさ | 汎用的な非線形異常検知 |
-| `one_class_svm` | 正常領域境界からの逸脱 | 正常領域が比較的明確な場合 |
-| `elliptic_envelope` | 頑健マハラノビス距離 | 楕円状・正規分布に近い正常データ |
-| `kmeans` | 最近傍クラスタ中心からの距離 | 運転モードが複数ある場合 |
-| `dbscan` | 最近傍コアサンプルからの距離 | 任意形状の正常クラスタ |
-| `graphical_lasso` | 疎な精度行列に基づく関係逸脱 | センサ間・時点間の相関監視 |
+| detector | 異常度の考え方 |
+|---|---|
+| `robust_zscore` | 中央値・MADからの頑健な乖離 |
+| `pca` | Q残差とHotelling T² |
+| `knn` | 近傍点までの平均距離 |
+| `lof` | 局所密度の低下 |
+| `isolation_forest` | 分離されやすさ |
+| `one_class_svm` | 正常領域境界からの逸脱 |
+| `elliptic_envelope` | 頑健マハラノビス距離 |
+| `kmeans` | 最近傍クラスタ中心からの距離 |
+| `dbscan` | 最近傍コアサンプルからの距離 |
+| `graphical_lasso` | 疎な多変量関係からの逸脱 |
 
 ```python
 print(AnomalyDetectionPipeline.available_detectors())
 ```
 
-## Graphical Lassoとwindow
-
-`graphical_lasso`へ`window_size > 1`を指定すると、精度行列は現在値だけでなく過去時点を含む特徴量間関係を学習します。異常度は、学習した疎な関係構造に対するprecision-weightedな逸脱度です。
-
-```python
-model = AnomalyDetectionPipeline(
-    detector="graphical_lasso",
-    detector_params={"alpha": 0.05},
-    contamination=0.02,
-)
-model.fit(
-    df,
-    feature_cols=["sensor_a", "sensor_b", "sensor_c"],
-    time_col="timestamp",
-    group_cols=["equipment"],
-    window_size=10,
-)
-```
-
 ## 学習後のしきい値変更
 
-異常度を再計算・再学習せず、判定しきい値だけを変更できます。
+検知器を再学習せず、しきい値だけを変更できます。
 
 ```python
-scores = model.score_samples(df)
-
 model.set_threshold(contamination=0.01)
 result_1pct = model.predict(df)
 
@@ -118,7 +101,7 @@ model.set_threshold(threshold=8.5)
 result_fixed = model.predict(df)
 ```
 
-一時的なしきい値で判定する場合はモデル状態を変更しません。
+一時的なしきい値で判定する場合は、モデル状態を変更しません。
 
 ```python
 result = model.predict(df, threshold=7.0)
@@ -127,11 +110,11 @@ result = model.predict(df, threshold=7.0)
 ## 保存と読み込み
 
 ```python
-model.save("models/furnace_anomaly.joblib")
-loaded = AnomalyDetectionPipeline.load("models/furnace_anomaly.joblib")
+model.save("models/anomaly_model.joblib")
+loaded = AnomalyDetectionPipeline.load("models/anomaly_model.joblib")
 result = loaded.predict(new_df)
 ```
 
-## カスタム検知器
+## 時系列対応について
 
-`AnomalyDetector`を継承し、`fit()`と`score_samples()`を実装できます。`score_samples()`は、**大きいほど異常**となる1次元スコアを返してください。しきい値管理、DataFrame整列、欠損補完、window化、保存は`AnomalyDetectionPipeline`が担当します。
+現時点では、行順序に意味を持たせず、各行を独立した観測として処理します。時系列window、グループ別系列処理、変化点検知などは、この基本実装とは分けて後続対応します。

@@ -7,10 +7,12 @@ import logging
 import os
 from collections.abc import Sequence
 from contextlib import asynccontextmanager
+from datetime import date, datetime
 from pathlib import Path
 from threading import RLock
-from typing import Any, Literal
+from typing import Any, Literal, TypeAlias
 
+import joblib
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request, Response, status
@@ -18,10 +20,12 @@ from fastapi.encoders import jsonable_encoder
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from .pipeline import AnomalyDetectionPipeline
+from .time_series import TimeSeriesAnomalyDetectionPipeline
 
 LOGGER = logging.getLogger(__name__)
 MODEL_PATH_ENV = "ANOCHAN_MODEL_PATH"
 DEFAULT_MAX_BATCH_SIZE = 10_000
+ServablePipeline: TypeAlias = AnomalyDetectionPipeline | TimeSeriesAnomalyDetectionPipeline
 
 
 class PredictRequest(BaseModel):
@@ -33,18 +37,20 @@ class PredictRequest(BaseModel):
 
 
 class PredictionItem(BaseModel):
-    """Prediction for one input record."""
+    """Prediction for one tabular row or generated time-series window."""
 
     row_index: int
     prediction: int
     is_anomaly: bool
     decision_function: float
     anomaly_score: float
+    metadata: dict[str, JsonValue] | None = None
 
 
 class PredictResponse(BaseModel):
     """Batch prediction response."""
 
+    pipeline_type: str
     model_name: str
     count: int
     predictions: list[PredictionItem]
@@ -68,6 +74,7 @@ class HealthResponse(BaseModel):
 class ModelInfoResponse(BaseModel):
     """Loaded model metadata response."""
 
+    pipeline_type: str
     model_name: str
     required_columns: list[str]
     numeric_columns: list[str]
@@ -79,18 +86,17 @@ class ModelInfoResponse(BaseModel):
 
 def create_app(
     *,
-    model: AnomalyDetectionPipeline | None = None,
+    model: ServablePipeline | None = None,
     model_path: str | Path | None = None,
     max_batch_size: int = DEFAULT_MAX_BATCH_SIZE,
 ) -> FastAPI:
     """Create a FastAPI application that serves one fitted pipeline.
 
     Args:
-        model: Already loaded fitted pipeline. Intended mainly for embedding and
-            tests.
-        model_path: Joblib path created by :meth:`AnomalyDetectionPipeline.save`.
-            When omitted, ``ANOCHAN_MODEL_PATH`` is read during application startup.
-        max_batch_size: Maximum number of records accepted by one request.
+        model: Already loaded tabular or time-series anomaly pipeline.
+        model_path: Joblib path created by either pipeline's ``save`` method.
+            When omitted, ``ANOCHAN_MODEL_PATH`` is read during startup.
+        max_batch_size: Maximum number of source records accepted per request.
 
     Returns:
         Configured FastAPI application.
@@ -117,17 +123,14 @@ def create_app(
 
         if loaded_model is None and resolved_path is not None:
             try:
-                loaded_model = AnomalyDetectionPipeline.load(resolved_path)
+                loaded_model = load_pipeline(resolved_path)
             except Exception as exc:  # pragma: no cover - exact loader errors vary
                 raise RuntimeError(
                     f"Failed to load anochan model from '{resolved_path}'."
                 ) from exc
 
         if loaded_model is not None:
-            try:
-                loaded_model.get_config()
-            except Exception as exc:
-                raise RuntimeError("The configured anochan model is not fitted.") from exc
+            _validate_model(loaded_model)
 
         app.state.anochan_model = loaded_model
         app.state.inference_lock = RLock()
@@ -138,7 +141,7 @@ def create_app(
         title="anochan anomaly detection API",
         version="0.1.0",
         description=(
-            "Serve a fitted anochan preprocessing-and-anomaly-detection Pipeline. "
+            "Serve fitted tabular or time-series anochan pipelines. "
             "The API performs inference only and does not retrain the model."
         ),
         lifespan=lifespan,
@@ -157,18 +160,24 @@ def create_app(
     @app.get("/v1/model", response_model=ModelInfoResponse, tags=["model"])
     def model_info(request: Request) -> ModelInfoResponse:
         loaded_model = _require_model(request)
-        model_name = _model_name(loaded_model)
+        config = loaded_model.get_config()
         return ModelInfoResponse(
-            model_name=model_name,
+            pipeline_type=_pipeline_type(loaded_model, config),
+            model_name=_model_name(loaded_model),
             required_columns=list(loaded_model.all_cols),
             numeric_columns=list(loaded_model.num_cols),
             categorical_columns=list(loaded_model.cat_cols),
             transformed_feature_names=list(loaded_model.feature_names),
             available_models=list(loaded_model.available_models()),
-            config=jsonable_encoder(loaded_model.get_config()),
+            config=jsonable_encoder(config),
         )
 
-    @app.post("/v1/predict", response_model=PredictResponse, tags=["inference"])
+    @app.post(
+        "/v1/predict",
+        response_model=PredictResponse,
+        response_model_exclude_none=True,
+        tags=["inference"],
+    )
     def predict(payload: PredictRequest, request: Request) -> PredictResponse:
         _validate_batch_size(payload.records, max_batch_size)
         loaded_model = _require_model(request)
@@ -177,10 +186,7 @@ def create_app(
             with request.app.state.inference_lock:
                 result = loaded_model.predict(frame).reset_index(drop=True)
         except (KeyError, TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=str(exc),
-            ) from exc
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:  # pragma: no cover - defensive API boundary
             LOGGER.exception("Anomaly prediction failed.")
             raise HTTPException(
@@ -188,13 +194,13 @@ def create_app(
                 detail="Anomaly prediction failed.",
             ) from exc
 
-        required_output = {
+        output_columns = {
             "prediction",
             "is_anomaly",
             "decision_function",
             "anomaly_score",
         }
-        if not required_output.issubset(result.columns):
+        if not output_columns.issubset(result.columns):
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="The loaded model returned an unexpected prediction schema.",
@@ -207,17 +213,25 @@ def create_app(
                 detail="The loaded model returned non-finite scores.",
             )
 
+        metadata_columns = [column for column in result.columns if column not in output_columns]
         predictions = [
             PredictionItem(
                 row_index=row_index,
-                prediction=int(row.prediction),
-                is_anomaly=bool(row.is_anomaly),
-                decision_function=float(row.decision_function),
-                anomaly_score=float(row.anomaly_score),
+                prediction=int(row["prediction"]),
+                is_anomaly=bool(row["is_anomaly"]),
+                decision_function=float(row["decision_function"]),
+                anomaly_score=float(row["anomaly_score"]),
+                metadata=(
+                    {str(column): _json_scalar(row[column]) for column in metadata_columns}
+                    if metadata_columns
+                    else None
+                ),
             )
             for row_index, row in result.iterrows()
         ]
+        config = loaded_model.get_config()
         return PredictResponse(
+            pipeline_type=_pipeline_type(loaded_model, config),
             model_name=_model_name(loaded_model),
             count=len(predictions),
             predictions=predictions,
@@ -232,10 +246,7 @@ def create_app(
             with request.app.state.inference_lock:
                 transformed = loaded_model.transform(frame)
         except (KeyError, TypeError, ValueError) as exc:
-            raise HTTPException(
-                status_code=422,
-                detail=str(exc),
-            ) from exc
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:  # pragma: no cover - defensive API boundary
             LOGGER.exception("Anomaly preprocessing failed.")
             raise HTTPException(
@@ -258,7 +269,30 @@ def create_app(
     return app
 
 
-def _require_model(request: Request) -> AnomalyDetectionPipeline:
+def load_pipeline(path: str | Path) -> ServablePipeline:
+    """Load a supported fitted pipeline from a trusted joblib file."""
+
+    loaded = joblib.load(Path(path))
+    if not isinstance(
+        loaded,
+        (AnomalyDetectionPipeline, TimeSeriesAnomalyDetectionPipeline),
+    ):
+        raise TypeError(
+            "Expected AnomalyDetectionPipeline or "
+            f"TimeSeriesAnomalyDetectionPipeline, got {type(loaded).__name__}."
+        )
+    _validate_model(loaded)
+    return loaded
+
+
+def _validate_model(model: ServablePipeline) -> None:
+    try:
+        model.get_config()
+    except Exception as exc:
+        raise RuntimeError("The configured anochan model is not fitted.") from exc
+
+
+def _require_model(request: Request) -> ServablePipeline:
     loaded_model = getattr(request.app.state, "anochan_model", None)
     if loaded_model is None:
         raise HTTPException(
@@ -282,11 +316,34 @@ def _validate_batch_size(
         )
 
 
-def _model_name(model: AnomalyDetectionPipeline) -> str:
+def _pipeline_type(model: ServablePipeline, config: dict[str, Any] | None = None) -> str:
+    if config is None:
+        config = model.get_config()
+    return str(config.get("pipeline_type", "tabular"))
+
+
+def _model_name(model: ServablePipeline) -> str:
     if model.model_names:
         return str(model.model_names[0])
     predictor = getattr(model, "predictor", None)
     return type(predictor).__name__ if predictor is not None else "unknown"
+
+
+def _json_scalar(value: Any) -> JsonValue:
+    if value is None or value is pd.NA:
+        return None
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return value.isoformat()
+    if isinstance(value, np.generic):
+        value = value.item()
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
 
 
 def main() -> None:

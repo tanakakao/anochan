@@ -17,7 +17,7 @@ from .preprocessing import make_preprocess
 
 def make_pipeline(
     *,
-    model_name: str,
+    model_names: Sequence[str],
     num_cols: Sequence[str] = (),
     cat_cols: Sequence[str] = (),
     model_params: Mapping[str, Any] | None = None,
@@ -38,7 +38,12 @@ def make_pipeline(
     detection does not use.
     """
 
+    names = list(model_names)
+    if len(names) != 1:
+        raise ValueError("model_names must contain exactly one anomaly model.")
+
     preprocess = make_preprocess(
+        model_name=names[0],
         num_cols=num_cols,
         cat_cols=cat_cols,
         num_impute_type=num_impute_type,
@@ -52,7 +57,7 @@ def make_pipeline(
         n_components=n_components,
     )
     predictor = make_predictor(
-        model_name=model_name,
+        model_names=model_names,
         model_params=model_params,
     )
     model = Pipeline(
@@ -76,7 +81,7 @@ class AnomalyDetectionPipeline:
         self.num_cols: list[str] = []
         self.cat_cols: list[str] = []
         self.all_cols: list[str] = []
-        self.model_name: str | None = None
+        self.model_names: list[str] = []
         self.model_params: dict[str, Any] = {}
 
         self.num_impute_type: str | None = None
@@ -101,7 +106,7 @@ class AnomalyDetectionPipeline:
         *,
         num_cols: Sequence[str] = (),
         cat_cols: Sequence[str] = (),
-        model_name: str = "IsolationForest",
+        model_names: Sequence[str] = ("IsolationForest",),
         model_params: Mapping[str, Any] | None = None,
         num_impute_type: str | None = None,
         num_scale_type: str | None = None,
@@ -119,7 +124,7 @@ class AnomalyDetectionPipeline:
             df: Input table. Each row is treated as one independent sample.
             num_cols: Numeric feature columns.
             cat_cols: Categorical feature columns.
-            model_name: Anomaly model name.
+            model_names: One-element anomaly model-name sequence.
             model_params: Model constructor parameter overrides.
             num_impute_type: Numeric imputation method.
             num_scale_type: Numeric scaling method.
@@ -143,7 +148,7 @@ class AnomalyDetectionPipeline:
         self._validate_columns(df)
 
         self.X = df.loc[:, self.all_cols].copy()
-        self.model_name = model_name
+        self.model_names = list(model_names)
         self.model_params = dict(model_params or {})
         self.num_impute_type = num_impute_type
         self.num_scale_type = num_scale_type
@@ -156,7 +161,7 @@ class AnomalyDetectionPipeline:
         self.dec_n_components = dec_n_components
 
         self.model, self.preprocess, self.predictor = make_pipeline(
-            model_name=self.model_name,
+            model_names=self.model_names,
             num_cols=self.num_cols,
             cat_cols=self.cat_cols,
             model_params=self.model_params,
@@ -269,7 +274,7 @@ class AnomalyDetectionPipeline:
         return {
             "num_cols": list(self.num_cols),
             "cat_cols": list(self.cat_cols),
-            "model_name": self.model_name,
+            "model_names": list(self.model_names),
             "model_params": dict(self.model_params),
             "num_impute_type": self.num_impute_type,
             "num_scale_type": self.num_scale_type,

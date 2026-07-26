@@ -1,120 +1,156 @@
 # anochan
 
-`anochan` は、`malchan` から異常検知部分を分離して扱うための独立した Python パッケージです。今回の初期実装では、表形式データの各行を1つの観測として扱う純粋な異常検知に範囲を限定しています。
+`anochan`は、`malchan`に含まれていた異常検知処理を独立して扱うためのPythonパッケージです。初期段階では、`malchan`の構成にできるだけ合わせて、**前処理と異常検知モデルを1つのscikit-learn Pipelineへまとめること**を優先しています。
 
-時系列window、装置・ライン別の系列分割、時間集約などは含めません。これらは、基本的な異常検知機能を分離した後の拡張として追加します。
+時系列window、装置・ライン単位の系列分割、時間集約、変化点検知は今回の範囲に含めません。
 
-## 今回の分離方針
+## Pipeline構成
 
-- `malchan` 側は変更しない
-- 教師なし異常検知のため、`target_col` / `target_cols` / `targetcols` は使用しない
-- 入力は `feature_cols` で指定する
-- `feature_cols` 未指定時は数値列を自動選択する
-- ラベル、ID、バッチ番号などの数値メタデータは `exclude_cols` で除外する
-- 欠損値補完、標準化、異常度計算、しきい値判定、モデル保存を提供する
-- 時系列固有の引数や処理は追加しない
+学習後の`model.model`は次の2ステップを持ちます。
 
-## インストール
-
-```bash
-git clone https://github.com/tanakakao/anochan.git
-cd anochan
-pip install -e .
+```text
+Pipeline
+├── preprocess
+│   ├── 数値列: 欠損補完・スケーリング
+│   ├── カテゴリ列: 欠損補完・One-Hot Encoding
+│   ├── 多項式・交互作用特徴量（任意）
+│   └── 次元削減（任意）
+└── predictor
+    └── 異常検知モデル
 ```
 
-開発用:
+これは`malchan.models.pipelines.make_pipeline()`の`preprocess`→`predictor`構成に合わせています。教師なし異常検知では不要な`target_col`、`task`、チューニング、アンサンブル関連の引数は除外しています。
 
-```bash
-pip install -e ".[dev]"
-```
-
-## 基本例
+## 基本的な使用方法
 
 ```python
-import pandas as pd
-
 from anochan import AnomalyDetectionPipeline
 
-model = AnomalyDetectionPipeline(
-    detector="isolation_forest",
-    contamination=0.03,
-)
-
-result = model.fit_predict(
+model = AnomalyDetectionPipeline()
+model.fit(
     df,
-    feature_cols=["temperature", "current", "pressure"],
+    num_cols=["temperature", "current", "pressure"],
+    cat_cols=["machine"],
+    model_name="IsolationForest",
+    model_params={"random_state": 42},
+    num_impute_type="median",
+    num_scale_type="StandardScaler",
+    cat_impute=True,
 )
 
-output = pd.concat([df, result], axis=1)
-print(output[["anomaly_score", "threshold", "is_anomaly"]])
+result = model.predict(new_df)
 ```
 
-各入力行に対して、次の3列を返します。
+`model.model`は通常のscikit-learn Pipelineなので、各ステップへ直接アクセスできます。
 
-| 列 | 内容 |
-|---|---|
-| `anomaly_score` | 異常度。大きいほど異常 |
-| `threshold` | 判定に使用したしきい値 |
-| `is_anomaly` | 異常判定結果 |
+```python
+preprocess = model.model.named_steps["preprocess"]
+predictor = model.model.named_steps["predictor"]
 
-## 特徴量の自動選択
+preprocessed_df = model.transform(new_df)
+```
 
-`feature_cols`を指定しない場合は数値列を自動選択します。既知の異常ラベル、ID、バッチ番号など、特徴量に使用しない数値列は`exclude_cols`へ指定します。
+## 入力列
+
+目的変数は使用しません。入力列は`malchan`と同様に数値列とカテゴリ列へ分けて指定します。
+
+```python
+num_cols=["temperature", "current"]
+cat_cols=["machine", "product"]
+```
+
+`feature_cols`、`exclude_cols`、`target_col`、`target_cols`は使用しません。
+
+## 数値前処理
+
+`num_impute_type`:
+
+- `None`
+- `Multiple`
+- `mean`
+- `median`
+- `most_frequent`
+- `knn`
+
+`num_scale_type`:
+
+- `None`
+- `StandardScaler`
+- `MinMaxScaler`
+- `centering`
+- `MaxAbsScaler`
+
+## カテゴリ前処理
+
+`cat_cols`はOne-Hot Encodingされます。`cat_impute=True`の場合、欠損値を最頻値で補完してからエンコードします。未知カテゴリは無視されるため、学習時に存在しないカテゴリを含むデータも変換できます。
+
+## 特徴量変換
 
 ```python
 model.fit(
     df,
-    exclude_cols=["known_label", "batch_no"],
+    num_cols=["x1", "x2", "x3"],
+    model_name="OneClassSVM",
+    num_scale_type="StandardScaler",
+    poly=True,
+    poly_degree=2,
+    poly_interaction_only=True,
+    decomposition=True,
+    decomposition_method="PCA",
+    dec_n_components=2,
 )
 ```
 
-非数値列は自動選択の対象になりません。
+次元削減は`PCA`、`KernelPCA`、`NMF`、`ICA`に対応します。
 
-## 利用可能な手法
+## 異常検知モデル
 
-| detector | 異常度の考え方 |
+`malchan`の異常検知モデル定義から次の3モデルを移しています。
+
+| `model_name` | 既定値 |
 |---|---|
-| `robust_zscore` | 中央値・MADからの頑健な乖離 |
-| `pca` | Q残差とHotelling T² |
-| `knn` | 近傍点までの平均距離 |
-| `lof` | 局所密度の低下 |
-| `isolation_forest` | 分離されやすさ |
-| `one_class_svm` | 正常領域境界からの逸脱 |
-| `elliptic_envelope` | 頑健マハラノビス距離 |
-| `kmeans` | 最近傍クラスタ中心からの距離 |
-| `dbscan` | 最近傍コアサンプルからの距離 |
-| `graphical_lasso` | 疎な多変量関係からの逸脱 |
+| `OneClassSVM` | `nu=0.2`, `kernel="rbf"`, `gamma="auto"` |
+| `IsolationForest` | `n_estimators=100`, `contamination="auto"` |
+| `EllipticEnvelope` | `contamination=0.01` |
+
+既定値は`model_params`で上書きできます。
 
 ```python
-print(AnomalyDetectionPipeline.available_detectors())
+model.fit(
+    df,
+    num_cols=["x1", "x2"],
+    model_name="IsolationForest",
+    model_params={
+        "n_estimators": 300,
+        "contamination": 0.03,
+        "random_state": 42,
+    },
+)
 ```
 
-## 学習後のしきい値変更
-
-検知器を再学習せず、しきい値だけを変更できます。
+## 出力
 
 ```python
-model.set_threshold(contamination=0.01)
-result_1pct = model.predict(df)
-
-model.set_threshold(threshold=8.5)
-result_fixed = model.predict(df)
+result = model.predict(df)
 ```
 
-一時的なしきい値で判定する場合は、モデル状態を変更しません。
-
-```python
-result = model.predict(df, threshold=7.0)
-```
+| 列 | 内容 |
+|---|---|
+| `prediction` | scikit-learn準拠。正常=`1`、異常=`-1` |
+| `is_anomaly` | `prediction == -1`の真偽値 |
+| `decision_function` | モデル標準の判別値。大きいほど正常側 |
+| `anomaly_score` | `-decision_function`。大きいほど異常側 |
 
 ## 保存と読み込み
 
+前処理と異常検知モデルをまとめて保存します。
+
 ```python
-model.save("models/anomaly_model.joblib")
-loaded = AnomalyDetectionPipeline.load("models/anomaly_model.joblib")
+model.save("models/anomaly_pipeline.joblib")
+loaded = AnomalyDetectionPipeline.load("models/anomaly_pipeline.joblib")
 result = loaded.predict(new_df)
 ```
 
-## 時系列対応について
+## 今回含めないもの
 
-現時点では、行順序に意味を持たせず、各行を独立した観測として処理します。時系列window、グループ別系列処理、変化点検知などは、この基本実装とは分けて後続対応します。
+`malchan`の材料・化学向けSMILES／組成特徴量生成は重い任意依存を必要とするため、今回の表形式異常検知の分離には含めていません。必要になった段階で、独立したoptional dependencyとして追加します。

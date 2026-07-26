@@ -10,11 +10,14 @@ from .preprocessing import (
     make_preprocess,
     make_preprocess_pipeline,
 )
+from .time_series import SUPPORTED_WINDOW_FEATURES, TimeSeriesAnomalyDetectionPipeline
 
 __all__ = [
     "AD_DEFAULT_PARAMS",
     "AD_MODEL_DICT",
     "AnomalyDetectionPipeline",
+    "SUPPORTED_WINDOW_FEATURES",
+    "TimeSeriesAnomalyDetectionPipeline",
     "available_models",
     "make_categorical_preprocess",
     "make_common_preprocess",

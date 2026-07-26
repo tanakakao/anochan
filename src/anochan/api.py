@@ -136,7 +136,7 @@ def create_app(
 
     app = FastAPI(
         title="anochan anomaly detection API",
-        version="1.0.0",
+        version="0.1.0",
         description=(
             "Serve a fitted anochan preprocessing-and-anomaly-detection Pipeline. "
             "The API performs inference only and does not retrain the model."
@@ -178,7 +178,7 @@ def create_app(
                 result = loaded_model.predict(frame).reset_index(drop=True)
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=422,
                 detail=str(exc),
             ) from exc
         except Exception as exc:  # pragma: no cover - defensive API boundary
@@ -233,7 +233,7 @@ def create_app(
                 transformed = loaded_model.transform(frame)
         except (KeyError, TypeError, ValueError) as exc:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                status_code=422,
                 detail=str(exc),
             ) from exc
         except Exception as exc:  # pragma: no cover - defensive API boundary
@@ -277,7 +277,7 @@ def _validate_batch_size(
 ) -> None:
     if len(records) > max_batch_size:
         raise HTTPException(
-            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            status_code=413,
             detail=f"Batch size {len(records)} exceeds the limit {max_batch_size}.",
         )
 
